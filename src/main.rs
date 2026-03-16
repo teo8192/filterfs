@@ -42,6 +42,12 @@ struct Args {
     /// if nothing is given, everything is included
     #[arg(short, long)]
     include: Option<String>,
+
+    /// FUSE-style mount options
+    /// i.e. -o include=so,include=TAG
+    /// will yield includes for both .so and .TAG and nothing else
+    #[arg(short = 'o')]
+    options: Option<String>,
 }
 
 const TTL: Duration = Duration::from_secs(1);
@@ -177,14 +183,8 @@ struct FilterFS {
 }
 
 impl FilterFS {
-    fn new(root: PathBuf, include_str: Option<String>) -> Self {
+    fn new(root: PathBuf, include: HashSet<String>) -> Self {
         let inoman = INodeManager::new(&root);
-        let mut include = HashSet::new();
-        if let Some(include_str) = include_str {
-            for ext in include_str.split(",") {
-                include.insert(ext.to_string());
-            }
-        }
         Self {
             // root,
             include,
@@ -412,7 +412,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     env_logger::init();
 
-    let filesys = FilterFS::new(args.source, args.include);
+    let mut include = HashSet::new();
+    if let Some(include_str) = args.include {
+        for ext in include_str.split(",") {
+            include.insert(ext.to_string());
+        }
+    }
+
+    if let Some(options) = args.options {
+        for option in options.split(',') {
+            let mut option = option.split('=');
+            match option.next() {
+                Some("include") => {
+                    include.insert(option.next().unwrap().to_string());
+                }
+                _ => {
+                    panic!("unknown option");
+                }
+            }
+        }
+    }
+
+    let filesys = FilterFS::new(args.source, include);
     let mut options = Config::default();
     options.mount_options = vec![MountOption::FSName("filterfs".to_string())];
 
