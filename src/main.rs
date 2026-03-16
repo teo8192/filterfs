@@ -1,0 +1,264 @@
+use std::collections::HashMap;
+use std::env;
+use std::error::Error;
+use std::ffi::OsStr;
+use std::fs::{self, DirEntry};
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, UNIX_EPOCH};
+
+use fuser::{
+    Config, Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo, ReplyAttr,
+    ReplyDirectory, ReplyEntry, Request,
+};
+use log::{debug, warn};
+
+const TTL: Duration = Duration::from_secs(1);
+
+struct INode {
+    path: PathBuf,
+    parent: INodeNo,
+}
+
+struct INodeManager {
+    path_to_inode: HashMap<PathBuf, INodeNo>,
+    inodes: HashMap<INodeNo, INode>,
+    next_inode: INodeNo,
+}
+
+impl INodeManager {
+    fn new(root: &Path) -> Self {
+        let mut path_to_inode = HashMap::new();
+        let mut inodes = HashMap::new();
+        path_to_inode.insert(root.to_path_buf(), INodeNo(1));
+        let inode = INode {
+            path: root.to_path_buf(),
+            parent: INodeNo(1),
+        };
+
+        inodes.insert(INodeNo(1), inode);
+
+        Self {
+            path_to_inode,
+            inodes,
+            next_inode: INodeNo(2),
+        }
+    }
+
+    fn next_inode(&mut self) -> INodeNo {
+        let INodeNo(ino) = self.next_inode;
+        self.next_inode = INodeNo(ino + 1);
+        INodeNo(ino)
+    }
+
+    fn ino(&mut self, path: &Path) -> INodeNo {
+        if let Some(ino) = self.path_to_inode.get(path) {
+            return *ino;
+        }
+
+        // need to get parent ino
+        let pino = match path.parent() {
+            Some(p) => self.ino(p),
+            None => {
+                return INodeNo(1); // has no parent, assume root
+            }
+        };
+
+        // need to allocate a new inode (and perhaps look for parent?)
+        let nino = self.next_inode();
+        let inode = INode {
+            path: path.to_path_buf(),
+            parent: pino,
+        };
+
+        debug!(
+            "inserting {:?} as ino {:?} with parent {:?}",
+            path, nino, pino
+        );
+        self.path_to_inode.insert(path.to_path_buf(), nino);
+        self.inodes.insert(nino, inode);
+
+        nino
+    }
+
+    fn path(&self, ino: INodeNo) -> Option<PathBuf> {
+        self.inodes.get(&ino).map(|v| v.path.clone())
+    }
+
+    fn parent(&self, ino: INodeNo) -> Option<INodeNo> {
+        self.inodes.get(&ino).map(|v| v.parent)
+    }
+}
+
+struct FilterFS {
+    root: PathBuf,
+    inoman: Mutex<INodeManager>,
+}
+
+impl FilterFS {
+    fn new(root: PathBuf) -> Self {
+        let inoman = INodeManager::new(&root);
+        Self {
+            root,
+            inoman: Mutex::new(inoman),
+        }
+    }
+}
+
+macro_rules! time {
+    ($time:expr) => {
+        UNIX_EPOCH + Duration::from_secs($time as u64)
+    };
+}
+
+fn filetype(metadata: &fs::Metadata) -> FileType {
+    match metadata.mode() & libc::S_IFMT {
+        libc::S_IFREG => FileType::RegularFile,
+        libc::S_IFDIR => FileType::Directory,
+        libc::S_IFLNK => FileType::Symlink,
+        libc::S_IFCHR => FileType::CharDevice,
+        libc::S_IFBLK => FileType::BlockDevice,
+        libc::S_IFIFO => FileType::NamedPipe,
+        libc::S_IFSOCK => FileType::Socket,
+        _ => FileType::RegularFile, // default to regular file
+    }
+}
+
+fn filetype_of_path(path: &PathBuf) -> Option<FileType> {
+    Some(filetype(&fs::metadata(&path).ok()?))
+}
+
+fn permissions(perm: fs::Permissions) -> u16 {
+    (perm.mode() & 0o7777) as u16 // keep the lower 12 bits
+}
+
+macro_rules! cutoff {
+    ($num:expr) => {
+        ::std::cmp::min($num, u32::MAX as u64) as u32
+    };
+}
+
+fn convert_metadata(metadata: &fs::Metadata, ino: Option<INodeNo>) -> FileAttr {
+    let ino = match ino {
+        Some(ino) => ino,
+        None => INodeNo(metadata.ino()),
+    };
+    FileAttr {
+        ino,
+        size: metadata.size(),
+        blocks: metadata.blocks(),
+        atime: time!(metadata.atime()),
+        mtime: time!(metadata.mtime()),
+        ctime: time!(metadata.ctime()),
+        crtime: UNIX_EPOCH, // macos only
+        kind: filetype(metadata),
+        perm: permissions(metadata.permissions()),
+        nlink: cutoff!(metadata.nlink()),
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        rdev: cutoff!(metadata.rdev()),
+        blksize: cutoff!(metadata.blksize()),
+        flags: 0, //macos only
+    }
+}
+
+macro_rules! autorep {
+    ($val:expr, $rep:ident, $type:expr) => {
+        match $val {
+            Some(v) => v,
+            None => {
+                $rep.error($type);
+                return;
+            }
+        }
+    };
+
+    ($val:expr, $rep:ident) => {
+        match $val {
+            Some(v) => v,
+            None => {
+                $rep.error(Errno::EIO);
+                return;
+            }
+        }
+    };
+}
+
+impl Filesystem for FilterFS {
+    /// Get file attributes.
+    fn getattr(&self, _req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
+        debug!("Getting attributes for {}, fh: {:?}", ino, fh);
+        let inoman = autorep!(self.inoman.lock().ok(), reply, Errno::EIO);
+        let path = autorep!(inoman.path(ino), reply);
+
+        let metadata = autorep!(fs::metadata(&path).ok(), reply, Errno::ENOENT);
+
+        let attr: FileAttr = convert_metadata(&metadata, Some(ino));
+        reply.attr(&TTL, &attr);
+    }
+
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        let mut inoman = autorep!(self.inoman.lock().ok(), reply);
+        let mut path = autorep!(inoman.path(parent), reply);
+        path.push(name);
+        let ino = inoman.ino(&path);
+        let metadata = autorep!(fs::metadata(&path).ok(), reply, Errno::ENOENT);
+        reply.entry(&TTL, &convert_metadata(&metadata, Some(ino)), Generation(0));
+    }
+
+    fn readdir(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        mut reply: ReplyDirectory,
+    ) {
+        debug!("Entering readdir, fh: {:?}, offset: {}", fh, offset);
+        let mut inoman = autorep!(self.inoman.lock().ok(), reply);
+        let path = autorep!(inoman.path(ino), reply);
+
+        // check if directory
+        if !path.is_dir() {
+            reply.error(Errno::ENOTDIR);
+            return;
+        }
+
+        for (i, entry_result) in autorep!(fs::read_dir(&path).ok(), reply)
+            .skip(offset as usize)
+            .enumerate()
+        {
+            let entry = autorep!(entry_result.ok(), reply);
+            let path = entry.path();
+            let ino = inoman.ino(&path);
+            let kind = autorep!(filetype_of_path(&path), reply);
+            let name = autorep!(path.file_name(), reply);
+            let name = autorep!(name.to_str(), reply);
+
+            // return offset of next entry
+            if reply.add(ino, i as u64 + offset + 1, kind, name) {
+                // buffer full
+                return;
+            }
+        }
+
+        reply.ok()
+    }
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    if env::var("RUST_LOG").is_err() {
+        unsafe { env::set_var("RUST_LOG", "debug") };
+    }
+    env_logger::init();
+
+    let filesys = FilterFS::new(PathBuf::from("target"));
+
+    Ok(fuser::mount2(
+        filesys,
+        PathBuf::from("testdir"),
+        &Config::default(),
+    )?)
+}
