@@ -1,32 +1,55 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
 use std::ffi::OsStr;
-use std::fs::{self, DirEntry};
-use std::io::Read;
+use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, UNIX_EPOCH};
 
+use clap::Parser;
 use fuser::{
     Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo,
-    LockOwner, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, Request,
+    LockOwner, MountOption, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, Request,
 };
-use log::{debug, warn};
+use log::debug;
 
 use crate::id::IdManager;
 
 mod id;
 
+/// FilterFS
+#[derive(Parser)]
+struct Args {
+    /// Underlying source directory
+    source: PathBuf,
+
+    /// Mount point
+    mountpoint: PathBuf,
+
+    /// Run in foreground
+    #[arg(short, long)]
+    foreground: bool,
+
+    /// Enable debug logging
+    #[arg(short, long)]
+    debug: bool,
+
+    /// Extensions to include, ',' separated list
+    /// if nothing is given, everything is included
+    #[arg(short, long)]
+    include: Option<String>,
+}
+
 const TTL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 struct INode {
-    id: INodeNo,
-    parent: INodeNo,
+    // id: INodeNo,
+    // parent: INodeNo,
     path: PathBuf,
 }
 
@@ -42,9 +65,9 @@ impl INodeManager {
         let mut inodes = HashMap::new();
         path_to_inode.insert(root.to_path_buf(), INodeNo(1));
         let inode = INode {
-            id: INodeNo(1),
+            // id: INodeNo(1),
             path: root.to_path_buf(),
-            parent: INodeNo(1),
+            // parent: INodeNo(1),
         };
 
         inodes.insert(INodeNo(1), inode);
@@ -68,19 +91,19 @@ impl INodeManager {
         }
 
         // need to get parent ino
-        let pino = match path.parent() {
+        /*let pino = match path.parent() {
             Some(p) => self.ino(p),
             None => {
                 return INodeNo(1); // has no parent, assume root
             }
-        };
+        };*/
 
         // need to allocate a new inode (and perhaps look for parent?)
         let nino = self.next_inode();
         let inode = INode {
-            id: nino,
+            // id: nino,
             path: path.to_path_buf(),
-            parent: pino,
+            // parent: pino,
         };
 
         self.path_to_inode.insert(path.to_path_buf(), nino);
@@ -97,22 +120,17 @@ impl INodeManager {
         self.inodes.get(&ino).map(|v| v.path.clone())
     }
 
+    /*
     fn parent(&self, ino: INodeNo) -> Option<INodeNo> {
         self.inodes.get(&ino).map(|v| v.parent)
-    }
+    }*/
 }
 
 type FhId = u64;
 
 struct Handle {
-    inode: INode,
+    // inode: INode,
     handle: fs::File,
-}
-
-impl Handle {
-    pub fn handle(&self) -> &fs::File {
-        &self.handle
-    }
 }
 
 struct FhManager {
@@ -131,7 +149,10 @@ impl FhManager {
     pub fn open(&mut self, inode: INode) -> Option<FhId> {
         let fhid = self.idman.get();
         let fh = fs::File::open(&inode.path).ok()?;
-        let handle = Handle { inode, handle: fh };
+        let handle = Handle {
+            //inode,
+            handle: fh,
+        };
 
         self.handle_to_inode.insert(fhid, handle);
 
@@ -149,18 +170,38 @@ impl FhManager {
 }
 
 struct FilterFS {
-    root: PathBuf,
+    // root: PathBuf,
+    include: HashSet<String>,
     inoman: Mutex<INodeManager>,
     fhman: Mutex<FhManager>,
 }
 
 impl FilterFS {
-    fn new(root: PathBuf) -> Self {
+    fn new(root: PathBuf, include_str: Option<String>) -> Self {
         let inoman = INodeManager::new(&root);
+        let mut include = HashSet::new();
+        if let Some(include_str) = include_str {
+            for ext in include_str.split(",") {
+                include.insert(ext.to_string());
+            }
+        }
         Self {
-            root,
+            // root,
+            include,
             inoman: Mutex::new(inoman),
             fhman: Mutex::new(FhManager::new()),
+        }
+    }
+
+    fn include_file(&self, file: &PathBuf) -> bool {
+        if self.include.is_empty() {
+            return true;
+        }
+
+        if let Some(ext) = file.extension() && let Some(ext) = ext.to_str() {
+            self.include.contains(ext)
+        } else {
+            false
         }
     }
 }
@@ -334,6 +375,14 @@ impl Filesystem for FilterFS {
         }
 
         for (i, entry_result) in autorep!(fs::read_dir(&path).ok(), reply)
+            .filter(|entry_result| {
+                if let Ok(entry) = entry_result {
+                    let path  = entry.path();
+                    path.is_dir() || self.include_file(&path)
+                } else {
+                    true
+                }
+            })
             .skip(offset as usize)
             .enumerate()
         {
@@ -356,16 +405,16 @@ impl Filesystem for FilterFS {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    if env::var("RUST_LOG").is_err() {
+    let args = Args::parse();
+
+    if env::var("RUST_LOG").is_err() && args.debug {
         unsafe { env::set_var("RUST_LOG", "debug") };
     }
     env_logger::init();
 
-    let filesys = FilterFS::new(PathBuf::from("target"));
+    let filesys = FilterFS::new(args.source, args.include);
+    let mut options = Config::default();
+    options.mount_options = vec![MountOption::FSName("filterfs".to_string())];
 
-    Ok(fuser::mount2(
-        filesys,
-        PathBuf::from("testdir"),
-        &Config::default(),
-    )?)
+    Ok(fuser::mount2(filesys, args.mountpoint, &options)?)
 }
