@@ -239,11 +239,7 @@ macro_rules! cutoff {
     };
 }
 
-fn convert_metadata(metadata: &fs::Metadata, ino: Option<INodeNo>) -> FileAttr {
-    let ino = match ino {
-        Some(ino) => ino,
-        None => INodeNo(metadata.ino()),
-    };
+fn convert_metadata(metadata: &fs::Metadata, ino: INodeNo) -> FileAttr {
     FileAttr {
         ino,
         size: metadata.size(),
@@ -294,7 +290,7 @@ impl Filesystem for FilterFS {
 
         let metadata = autorep!(fs::metadata(&path).ok(), reply, Errno::ENOENT);
 
-        let attr: FileAttr = convert_metadata(&metadata, Some(ino));
+        let attr: FileAttr = convert_metadata(&metadata, ino);
         reply.attr(&TTL, &attr);
     }
 
@@ -304,7 +300,7 @@ impl Filesystem for FilterFS {
         path.push(name);
         let ino = inoman.ino(&path);
         let metadata = autorep!(fs::metadata(&path).ok(), reply, Errno::ENOENT);
-        reply.entry(&TTL, &convert_metadata(&metadata, Some(ino)), Generation(0));
+        reply.entry(&TTL, &convert_metadata(&metadata, ino), Generation(0));
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
@@ -416,6 +412,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    let mut allow_other = false;
+
     if let Some(options) = args.options {
         for option in options.split(',') {
             let mut option = option.split('=');
@@ -426,8 +424,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Some("debug") => {
                     is_debug = true;
                 }
-                _ => {
-                    panic!("unknown option");
+                Some("allow_other") => {
+                     allow_other = true;
+                },
+                opt => {
+                    eprintln!("unknown option: {:?}", opt);
                 }
             }
         }
@@ -442,6 +443,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let filesys = FilterFS::new(args.source, include);
     let mut options = Config::default();
     options.mount_options = vec![MountOption::FSName("filterfs".to_string())];
+    if allow_other {
+        options.acl = fuser::SessionACL::All;
+    }
 
     Ok(fuser::mount2(filesys, args.mountpoint, &options)?)
 }
