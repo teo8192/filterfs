@@ -3,23 +3,31 @@ use std::env;
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry};
-use std::os::unix::fs::MetadataExt;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, UNIX_EPOCH};
 
 use fuser::{
-    Config, Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo, ReplyAttr,
-    ReplyDirectory, ReplyEntry, Request,
+    Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo,
+    LockOwner, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyOpen, Request,
 };
 use log::{debug, warn};
 
+use crate::id::IdManager;
+
+mod id;
+
 const TTL: Duration = Duration::from_secs(1);
 
+#[derive(Clone)]
 struct INode {
-    path: PathBuf,
+    id: INodeNo,
     parent: INodeNo,
+    path: PathBuf,
 }
 
 struct INodeManager {
@@ -34,6 +42,7 @@ impl INodeManager {
         let mut inodes = HashMap::new();
         path_to_inode.insert(root.to_path_buf(), INodeNo(1));
         let inode = INode {
+            id: INodeNo(1),
             path: root.to_path_buf(),
             parent: INodeNo(1),
         };
@@ -69,18 +78,19 @@ impl INodeManager {
         // need to allocate a new inode (and perhaps look for parent?)
         let nino = self.next_inode();
         let inode = INode {
+            id: nino,
             path: path.to_path_buf(),
             parent: pino,
         };
 
-        debug!(
-            "inserting {:?} as ino {:?} with parent {:?}",
-            path, nino, pino
-        );
         self.path_to_inode.insert(path.to_path_buf(), nino);
         self.inodes.insert(nino, inode);
 
         nino
+    }
+
+    fn inode(&self, ino: INodeNo) -> Option<INode> {
+        self.inodes.get(&ino).cloned()
     }
 
     fn path(&self, ino: INodeNo) -> Option<PathBuf> {
@@ -92,9 +102,56 @@ impl INodeManager {
     }
 }
 
+type FhId = u64;
+
+struct Handle {
+    inode: INode,
+    handle: fs::File,
+}
+
+impl Handle {
+    pub fn handle(&self) -> &fs::File {
+        &self.handle
+    }
+}
+
+struct FhManager {
+    idman: IdManager<FhId>,
+    handle_to_inode: HashMap<FhId, Handle>,
+}
+
+impl FhManager {
+    pub fn new() -> Self {
+        Self {
+            idman: IdManager::new(),
+            handle_to_inode: HashMap::new(),
+        }
+    }
+
+    pub fn open(&mut self, inode: INode) -> Option<FhId> {
+        let fhid = self.idman.get();
+        let fh = fs::File::open(&inode.path).ok()?;
+        let handle = Handle { inode, handle: fh };
+
+        self.handle_to_inode.insert(fhid, handle);
+
+        Some(fhid)
+    }
+
+    pub fn release(&mut self, id: FhId) {
+        self.handle_to_inode.remove(&id);
+        self.idman.release(id);
+    }
+
+    pub fn handle(&self, id: FhId) -> Option<&Handle> {
+        self.handle_to_inode.get(&id)
+    }
+}
+
 struct FilterFS {
     root: PathBuf,
     inoman: Mutex<INodeManager>,
+    fhman: Mutex<FhManager>,
 }
 
 impl FilterFS {
@@ -103,6 +160,7 @@ impl FilterFS {
         Self {
             root,
             inoman: Mutex::new(inoman),
+            fhman: Mutex::new(FhManager::new()),
         }
     }
 }
@@ -206,6 +264,55 @@ impl Filesystem for FilterFS {
         let ino = inoman.ino(&path);
         let metadata = autorep!(fs::metadata(&path).ok(), reply, Errno::ENOENT);
         reply.entry(&TTL, &convert_metadata(&metadata, Some(ino)), Generation(0));
+    }
+
+    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        if flags.acc_mode() != OpenAccMode::O_RDONLY {
+            reply.error(Errno::EROFS);
+            return;
+        }
+
+        let inoman = autorep!(self.inoman.lock().ok(), reply);
+        let inode = autorep!(inoman.inode(ino), reply);
+        let mut fhman = autorep!(self.fhman.lock().ok(), reply);
+        let fh = autorep!(fhman.open(inode), reply);
+
+        reply.opened(FileHandle(fh), FopenFlags::empty());
+    }
+
+    fn release(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        let mut fhman = autorep!(self.fhman.lock().ok(), reply);
+        fhman.release(fh.0);
+        reply.ok();
+    }
+
+    fn read(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        size: u32,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
+        reply: ReplyData,
+    ) {
+        let fhman = autorep!(self.fhman.lock().ok(), reply);
+
+        let handle = autorep!(fhman.handle(fh.0), reply, Errno::EBADF);
+        let mut buf = vec![0u8; size as usize];
+        let count = autorep!(handle.handle.read_at(&mut buf, offset).ok(), reply);
+
+        reply.data(&buf[..count]);
     }
 
     fn readdir(
