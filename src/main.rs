@@ -407,10 +407,7 @@ impl Filesystem for FilterFS {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
-    if env::var("RUST_LOG").is_err() && args.debug {
-        unsafe { env::set_var("RUST_LOG", "debug") };
-    }
-    env_logger::init();
+    let mut is_debug = env::var("RUST_LOG").is_err() && args.debug;
 
     let mut include = HashSet::new();
     if let Some(include_str) = args.include {
@@ -426,12 +423,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Some("include") => {
                     include.insert(option.next().unwrap().to_string());
                 }
+                Some("debug") => {
+                    is_debug = true;
+                }
                 _ => {
                     panic!("unknown option");
                 }
             }
         }
     }
+
+    if is_debug {
+        unsafe { env::set_var("RUST_LOG", "debug") };
+    }
+    env_logger::init();
+
 
     let filesys = FilterFS::new(args.source, include);
     let mut options = Config::default();
