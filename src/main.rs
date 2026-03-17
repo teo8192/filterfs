@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let filesys = FilterFS::new(
-        args.source,
+        &args.source,
         prune_depth,
         file_incl,
         file_excl,
