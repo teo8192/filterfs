@@ -15,7 +15,7 @@ use fuser::{
     LockOwner, MountOption, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyOpen, Request,
 };
-use log::debug;
+use log::{debug, trace};
 
 use filterfs::id::IdManager;
 use filterfs::pattern::PatternRule;
@@ -37,14 +37,24 @@ struct Args {
     #[arg(short, long)]
     debug: bool,
 
-    /// Extensions to include, ',' separated list
-    /// if nothing is given, everything is included
-    #[arg(short, long)]
-    include: Option<String>,
-
     /// FUSE-style mount options
-    /// i.e. -o include=so,include=TAG
-    /// will yield includes for both .so and .TAG and nothing else
+    /// i.e. -o 'inlc=*.so,inlc=*.TAG,dexcl=*-*'
+    /// will yield includes for both .so and .TAG, and in addition exclude all dirs with '-' in
+    /// their names. The order of the application of rules is the order given. A file must match at
+    /// least one include and no exclude to be shown. If no includes are given, only excludes are
+    /// considered for display.
+    /// Supported options:
+    ///   - incl=glob
+    ///     - include file matching glob
+    ///   - excl=glob
+    ///     - exclude file matching glob
+    ///   - dincl=glob
+    ///     - include dir matching glob
+    ///   - dexcl=glob
+    ///     - exclude dir matching glob
+    ///   - prune=n
+    ///     - how deep to recursively search to see if dir is empty.
+    ///       default is 0
     #[arg(short = 'o')]
     options: Option<String>,
 }
@@ -176,42 +186,108 @@ impl FhManager {
 
 struct FilterFS {
     // root: PathBuf,
-    dir_rules: Vec<PatternRule>,
-    file_rules: Vec<PatternRule>,
+    dir_incl: Vec<PatternRule>,
+    dir_excl: Vec<PatternRule>,
+    file_incl: Vec<PatternRule>,
+    file_excl: Vec<PatternRule>,
+    prune_depth: usize,
     inoman: Mutex<INodeManager>,
     fhman: Mutex<FhManager>,
 }
 
 impl FilterFS {
-    fn new(root: PathBuf, include: Vec<PatternRule>) -> Self {
+    fn new(
+        root: PathBuf,
+        prune_depth: usize,
+        file_incl: Vec<PatternRule>,
+        file_excl: Vec<PatternRule>,
+        dir_incl: Vec<PatternRule>,
+        dir_excl: Vec<PatternRule>,
+    ) -> Self {
         let inoman = INodeManager::new(&root);
         Self {
             // root,
-            file_rules: include,
-            dir_rules: Vec::new(),
+            dir_incl,
+            dir_excl,
+            file_incl,
+            file_excl,
+            prune_depth,
             inoman: Mutex::new(inoman),
             fhman: Mutex::new(FhManager::new()),
         }
     }
 
+    fn is_empty_dir(&self, dir: &Path, depth: usize) -> bool {
+        trace!("checking if {:?} is empty", dir);
+        // recursion escape
+        if depth == 0 {
+            trace!("it aint, reached recursion depth");
+            return false;
+        }
+        let rd = if let Ok(rd) = fs::read_dir(dir) {
+            rd
+        } else {
+            trace!("it aint, failed to read dir");
+            return false;
+        };
+        let result = rd
+            .into_iter()
+            .find(|entry| {
+                let entry = if let Ok(entry) = entry {
+                    entry
+                } else {
+                    // no suppression of failed entries
+                    return true;
+                };
+                let path = entry.path();
+
+                if path.is_dir() {
+                    self.include_dir(&path) && self.is_empty_dir(&path, depth - 1)
+                } else {
+                    self.include_file(&path)
+                }
+            })
+            .is_none();
+        if result {
+            trace!("{:?} is empty!", dir);
+        } else {
+            trace!("{:?} is not empty!", dir);
+        }
+        result
+    }
+
     fn include_file(&self, file: &Path) -> bool {
-        for rule in &self.file_rules {
-            if !rule.include(file) {
-                return false;
+        let mut include = self.file_incl.is_empty();
+        for rule in &self.file_incl {
+            if rule.include(file) {
+                trace!("Include rule: {:?} matches {:?}!", rule, file);
+                include = true;
+                break;
             }
         }
 
-        true
+        if !include {
+            return false;
+        }
+
+        self.file_excl.iter().all(|rule| rule.include(file))
     }
 
     fn include_dir(&self, dir: &Path) -> bool {
-        for rule in &self.dir_rules {
-            if !rule.include(dir) {
-                return false;
+        let mut include = self.dir_incl.is_empty();
+        for rule in &self.dir_incl {
+            if rule.include(dir) {
+                trace!("Include rule: {:?} matches {:?}!", rule, dir);
+                include = true;
+                break;
             }
         }
 
-        true
+        if !include {
+            return false;
+        }
+
+        self.dir_excl.iter().all(|rule| rule.include(dir))
     }
 }
 
@@ -384,7 +460,7 @@ impl Filesystem for FilterFS {
                 if let Ok(entry) = entry_result {
                     let path = entry.path();
                     if path.is_dir() {
-                        self.include_dir(&path)
+                        self.include_dir(&path) && !self.is_empty_dir(&path, self.prune_depth)
                     } else {
                         self.include_file(&path)
                     }
@@ -418,25 +494,43 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut is_debug = env::var("RUST_LOG").is_err() && args.debug;
 
-    let mut include = Vec::new();
-    if let Some(include_str) = args.include {
-        for ext in include_str.split(",") {
-            include.push(PatternRule::new_include(ext)?);
-        }
-    }
-
+    let mut file_incl = Vec::new();
+    let mut file_excl = Vec::new();
+    let mut dir_incl = Vec::new();
+    let mut dir_excl = Vec::new();
     let mut allow_other = false;
+    let mut prune_depth = 0;
+    env_logger::init();
 
     if let Some(options) = args.options {
         for option in options.split(',') {
             let mut option = option.split('=');
             match option.next() {
-                Some("include") => {
+                Some("incl") => {
                     let glob = option.next().unwrap();
-                    include.push(PatternRule::new_include(glob)?);
+                    file_incl.push(PatternRule::new_include(glob)?);
+                    debug!("adding file include: '{}'", glob);
+                }
+                Some("excl") => {
+                    let glob = option.next().unwrap();
+                    file_excl.push(PatternRule::new_exclude(glob)?);
+                    debug!("adding file exclude: '{}'", glob);
+                }
+                Some("dincl") => {
+                    let glob = option.next().unwrap();
+                    dir_incl.push(PatternRule::new_include(glob)?);
+                    debug!("adding dir include: '{}'", glob);
+                }
+                Some("dexcl") => {
+                    let glob = option.next().unwrap();
+                    dir_excl.push(PatternRule::new_exclude(glob)?);
+                    debug!("adding dir exclude: '{}'", glob);
                 }
                 Some("debug") => {
                     is_debug = true;
+                }
+                Some("prune") => {
+                    prune_depth = option.next().and_then(|v| v.parse().ok()).unwrap();
                 }
                 Some("allow_other") => {
                     allow_other = true;
@@ -451,9 +545,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     if is_debug {
         unsafe { env::set_var("RUST_LOG", "debug") };
     }
-    env_logger::init();
 
-    let filesys = FilterFS::new(args.source, include);
+    let filesys = FilterFS::new(
+        args.source,
+        prune_depth,
+        file_incl,
+        file_excl,
+        dir_incl,
+        dir_excl,
+    );
     let mut options = Config::default();
     options.mount_options = vec![MountOption::FSName("filterfs".to_string())];
     if allow_other {

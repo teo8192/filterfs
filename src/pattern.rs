@@ -1,6 +1,7 @@
 use std::path::Path;
 use glob::{Pattern, PatternError};
 
+#[derive(Debug)]
 pub enum PatternRule {
     Include(Pattern),
     Exclude(Pattern),
