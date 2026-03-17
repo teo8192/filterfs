@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::ffi::OsStr;
@@ -17,9 +17,8 @@ use fuser::{
 };
 use log::debug;
 
-use crate::id::IdManager;
-
-mod id;
+use filterfs::id::IdManager;
+use filterfs::pattern::PatternRule;
 
 /// FilterFS
 #[derive(Parser)]
@@ -177,32 +176,42 @@ impl FhManager {
 
 struct FilterFS {
     // root: PathBuf,
-    include: HashSet<String>,
+    dir_rules: Vec<PatternRule>,
+    file_rules: Vec<PatternRule>,
     inoman: Mutex<INodeManager>,
     fhman: Mutex<FhManager>,
 }
 
 impl FilterFS {
-    fn new(root: PathBuf, include: HashSet<String>) -> Self {
+    fn new(root: PathBuf, include: Vec<PatternRule>) -> Self {
         let inoman = INodeManager::new(&root);
         Self {
             // root,
-            include,
+            file_rules: include,
+            dir_rules: Vec::new(),
             inoman: Mutex::new(inoman),
             fhman: Mutex::new(FhManager::new()),
         }
     }
 
-    fn include_file(&self, file: &PathBuf) -> bool {
-        if self.include.is_empty() {
-            return true;
+    fn include_file(&self, file: &Path) -> bool {
+        for rule in &self.file_rules {
+            if !rule.include(file) {
+                return false;
+            }
         }
 
-        if let Some(ext) = file.extension() && let Some(ext) = ext.to_str() {
-            self.include.contains(ext)
-        } else {
-            false
+        true
+    }
+
+    fn include_dir(&self, dir: &Path) -> bool {
+        for rule in &self.dir_rules {
+            if !rule.include(dir) {
+                return false;
+            }
         }
+
+        true
     }
 }
 
@@ -373,8 +382,12 @@ impl Filesystem for FilterFS {
         for (i, entry_result) in autorep!(fs::read_dir(&path).ok(), reply)
             .filter(|entry_result| {
                 if let Ok(entry) = entry_result {
-                    let path  = entry.path();
-                    path.is_dir() || self.include_file(&path)
+                    let path = entry.path();
+                    if path.is_dir() {
+                        self.include_dir(&path)
+                    } else {
+                        self.include_file(&path)
+                    }
                 } else {
                     true
                 }
@@ -405,10 +418,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut is_debug = env::var("RUST_LOG").is_err() && args.debug;
 
-    let mut include = HashSet::new();
+    let mut include = Vec::new();
     if let Some(include_str) = args.include {
         for ext in include_str.split(",") {
-            include.insert(ext.to_string());
+            include.push(PatternRule::new_include(ext)?);
         }
     }
 
@@ -419,14 +432,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut option = option.split('=');
             match option.next() {
                 Some("include") => {
-                    include.insert(option.next().unwrap().to_string());
+                    let glob = option.next().unwrap();
+                    include.push(PatternRule::new_include(glob)?);
                 }
                 Some("debug") => {
                     is_debug = true;
                 }
                 Some("allow_other") => {
-                     allow_other = true;
-                },
+                    allow_other = true;
+                }
                 opt => {
                     eprintln!("unknown option: {:?}", opt);
                 }
@@ -438,7 +452,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         unsafe { env::set_var("RUST_LOG", "debug") };
     }
     env_logger::init();
-
 
     let filesys = FilterFS::new(args.source, include);
     let mut options = Config::default();
