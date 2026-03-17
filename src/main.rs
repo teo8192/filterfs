@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::env;
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
@@ -32,10 +31,6 @@ struct Args {
     /// Run in foreground
     #[arg(short, long)]
     foreground: bool,
-
-    /// Enable debug logging
-    #[arg(short, long)]
-    debug: bool,
 
     /// FUSE-style mount options
     /// i.e. -o 'inlc=*.so,inlc=*.TAG,dexcl=*-*'
@@ -492,8 +487,6 @@ impl Filesystem for FilterFS {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
-    let mut is_debug = env::var("RUST_LOG").is_err() && args.debug;
-
     let mut file_incl = Vec::new();
     let mut file_excl = Vec::new();
     let mut dir_incl = Vec::new();
@@ -526,9 +519,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                     dir_excl.push(PatternRule::new_exclude(glob)?);
                     debug!("adding dir exclude: '{}'", glob);
                 }
-                Some("debug") => {
-                    is_debug = true;
-                }
                 Some("prune") => {
                     prune_depth = option.next().and_then(|v| v.parse().ok()).unwrap();
                 }
@@ -540,10 +530,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-    }
-
-    if is_debug {
-        unsafe { env::set_var("RUST_LOG", "debug") };
     }
 
     let filesys = FilterFS::new(
