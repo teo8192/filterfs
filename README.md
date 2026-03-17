@@ -23,9 +23,19 @@ sudo cp target/release/filterfs
 To mount a RO mirror that only shows `m4b` and `pdf` files:
 
 ```sh
-mount -t fuse.filterfs /source/directory /target/directory -o include=m4b,include=pdf
+mount -t fuse.filterfs /source/directory /target/directory -o 'incl=*.m4b,incl=*.pdf'
 ```
 
 Pass no options to have a RO mirror of all files.
+
+## Options
+
+ - `incl=glob`: include files matching glob
+ - `excl=glob`: exclude files matching glob
+ - `dincl=glob`: include directories matching glob
+ - `dexcl=glob`: exclude directories matching glob
+ - `prune=n`: how deep to recursively look for empty directories to prune. Default is `0`, i.e. no pruning.
+
+# TODO
 
 There are still some permission trouble, so this needs to be figured out.
