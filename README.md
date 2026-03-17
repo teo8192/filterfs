@@ -40,6 +40,7 @@ Pass no options to have a RO mirror of all files.
     exclude directories matching glob
  - `prune=n`
     how deep to recursively look for empty directories to prune. Default is `0`, i.e. no pruning.
+    Beware that pruning may cause performance losses, especially if the underlying directory contains a lot of directories again.
 
 # TODO
 
