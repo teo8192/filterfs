@@ -22,28 +22,35 @@ struct Args {
     foreground: bool,
 
     /// FUSE-style mount options
-    /// i.e. -o 'inlc=*.so,inlc=*.TAG,dexcl=*-*'
+    /// i.e. `-o 'inlc=*.so,inlc=*.TAG,dexcl=*-*'`
     /// will yield includes for both .so and .TAG, and in addition exclude all dirs with '-' in
     /// their names. The order of the application of rules is the order given. A file must match at
     /// least one include and no exclude to be shown. If no includes are given, only excludes are
     /// considered for display.
+    ///
     /// Supported options:
-    ///   - incl=glob
-    ///     - include file matching glob
-    ///   - excl=glob
-    ///     - exclude file matching glob
-    ///   - dincl=glob
-    ///     - include dir matching glob
-    ///   - dexcl=glob
-    ///     - exclude dir matching glob
-    ///   - prune=n
-    ///     - how deep to recursively search to see if dir is empty.
-    ///       default is 0
+    ///
+    ///   - incl=glob - include file matching glob
+    ///
+    ///   - excl=glob - exclude file matching glob
+    ///
+    ///   - dincl=glob - include dir matching glob
+    ///
+    ///   - dexcl=glob - exclude dir matching glob
+    ///
+    ///   - prune=n - how deep to recursively search to see if dir is empty. Default is 0
+    ///
+    ///   - allow_other
     #[arg(short = 'o')]
     options: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    match unsafe { nix::unistd::fork().unwrap() } {
+        nix::unistd::ForkResult::Parent { .. } => return Ok(()),
+        nix::unistd::ForkResult::Child => {}
+    }
+
     let args = Args::parse();
 
     let mut file_incl = Vec::new();
@@ -84,6 +91,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Some("allow_other") => {
                     allow_other = true;
                 }
+                Some("rw") => {
+                    eprintln!("RW unsupported, mounting as Read-Only filesystem!");
+                }
                 opt => {
                     eprintln!("unknown option: {:?}", opt);
                 }
@@ -100,10 +110,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         dir_excl,
     );
     let mut options = Config::default();
-    options.mount_options = vec![MountOption::FSName("filterfs".to_string())];
+    options.mount_options = vec![
+        MountOption::FSName("filterfs".to_string()),
+        MountOption::DefaultPermissions,
+    ];
     if allow_other {
         options.acl = fuser::SessionACL::All;
     }
 
-    Ok(fuser::mount2(filesys, args.mountpoint, &options)?)
+    fuser::mount2(filesys, args.mountpoint, &options)?;
+
+    Ok(())
 }
