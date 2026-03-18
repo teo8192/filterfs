@@ -148,7 +148,10 @@ impl FilterFS {
         let mut inoman = self.inoman.lock().map_err(|_| Errno::EIO)?;
         let path = inoman.path(parent).ok_or(Errno::ENOENT)?.join(name);
 
-        if !self.include_file(&path) {
+        let dir_fail = path.is_dir() && !self.include_dir(&path);
+        let file_fail = !path.is_dir() && !self.include_file(&path);
+
+        if dir_fail || file_fail {
             return Err(Errno::ENOENT);
         }
 
