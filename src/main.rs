@@ -45,6 +45,20 @@ struct Args {
     options: Option<String>,
 }
 
+fn parse_options<F>(options: String, mut callback: F) -> Result<(), String>
+where
+    F: FnMut(&str, Option<&str>) -> Result<(), String>,
+{
+    for option in options.split(',') {
+        let mut option = option.splitn(2, '=');
+        if let Some(opt) = option.next() && !opt.is_empty() {
+            callback(opt, option.next())?;
+        }
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     match unsafe { nix::unistd::fork().unwrap() } {
         nix::unistd::ForkResult::Parent { .. } => return Ok(()),
@@ -62,43 +76,48 @@ fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
     if let Some(options) = args.options {
-        for option in options.split(',') {
-            let mut option = option.split('=');
-            match option.next() {
-                Some("incl") => {
-                    let glob = option.next().unwrap();
-                    file_incl.push(PatternRule::new_include(glob)?);
-                    debug!("adding file include: '{}'", glob);
+        parse_options(options, |key, value| {
+            let value = || value.ok_or_else(|| format!("{} needs a value!", key));
+            let glob_fail = |e| format!("unable to parse glob: '{}': {}", value().unwrap(), e);
+            match key {
+                "incl" => {
+                    let value = value()?;
+                    file_incl.push(PatternRule::new_include(value).map_err(glob_fail)?);
+                    debug!("adding file include: '{}'", value);
                 }
-                Some("excl") => {
-                    let glob = option.next().unwrap();
-                    file_excl.push(PatternRule::new_exclude(glob)?);
-                    debug!("adding file exclude: '{}'", glob);
+                "excl" => {
+                    let value = value()?;
+                    file_excl.push(PatternRule::new_exclude(value).map_err(glob_fail)?);
+                    debug!("adding file exclude: '{}'", value);
                 }
-                Some("dincl") => {
-                    let glob = option.next().unwrap();
-                    dir_incl.push(PatternRule::new_include(glob)?);
-                    debug!("adding dir include: '{}'", glob);
+                "dincl" => {
+                    let value = value()?;
+                    dir_incl.push(PatternRule::new_include(value).map_err(glob_fail)?);
+                    debug!("adding dir include: '{}'", value);
                 }
-                Some("dexcl") => {
-                    let glob = option.next().unwrap();
-                    dir_excl.push(PatternRule::new_exclude(glob)?);
-                    debug!("adding dir exclude: '{}'", glob);
+                "dexcl" => {
+                    let value = value()?;
+                    dir_excl.push(PatternRule::new_exclude(value).map_err(glob_fail)?);
+                    debug!("adding dir exclude: '{}'", value);
                 }
-                Some("prune") => {
-                    prune_depth = option.next().and_then(|v| v.parse().ok()).unwrap();
+                "prune" => {
+                    let value = value()?;
+                    prune_depth = value
+                        .parse()
+                        .map_err(|e| format!("unable to num: '{}': {}", value, e))?;
                 }
-                Some("allow_other") => {
+                "allow_other" => {
                     allow_other = true;
                 }
-                Some("rw") => {
+                "rw" => {
                     eprintln!("RW unsupported, mounting as Read-Only filesystem!");
                 }
                 opt => {
                     eprintln!("unknown option: {:?}", opt);
                 }
             }
-        }
+            Ok(())
+        })?;
     }
 
     let filesys = FilterFS::new(
@@ -121,4 +140,101 @@ fn main() -> Result<(), Box<dyn Error>> {
     fuser::mount2(filesys, args.mountpoint, &options)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::parse_options;
+
+    #[test]
+    fn option_parsing() {
+        // init
+        let mut result = HashMap::new();
+        let mut expected = HashMap::new();
+
+        // setup
+        let options = "key=value".to_string();
+        expected.insert("key".to_string(), Some("value".to_string()));
+
+        // execute
+        parse_options(options, |key, value| {
+            let _ = result.insert(key.to_string(), value.map(|v| v.to_string()));
+            Ok(())
+        })
+        .unwrap();
+
+        // verify
+        assert_eq!(expected, result)
+    }
+
+    #[test]
+    fn option_parsing_multiple() {
+        // init
+        let mut result = HashMap::new();
+        let mut expected = HashMap::new();
+
+        // setup
+        let options = "key=value,key2,key3=value7".to_string();
+        expected.insert("key".to_string(), Some("value".to_string()));
+        expected.insert("key2".to_string(), None);
+        expected.insert("key3".to_string(), Some("value7".to_string()));
+
+        // execute
+        parse_options(options, |key, value| {
+            let _ = result.insert(key.to_string(), value.map(|v| v.to_string()));
+            Ok(())
+        })
+        .unwrap();
+
+        // verify
+        assert_eq!(expected, result)
+    }
+
+    #[test]
+    fn option_parsing_handle_empty() {
+        // init
+        let mut result = HashMap::new();
+        let mut expected = HashMap::new();
+
+        // setup
+        let options = "key=value,,,key2,,key3=value7".to_string();
+        expected.insert("key".to_string(), Some("value".to_string()));
+        expected.insert("key2".to_string(), None);
+        expected.insert("key3".to_string(), Some("value7".to_string()));
+
+        // execute
+        parse_options(options, |key, value| {
+            let _ = result.insert(key.to_string(), value.map(|v| v.to_string()));
+            Ok(())
+        })
+        .unwrap();
+
+        // verify
+        assert_eq!(expected, result)
+    }
+
+    #[test]
+    fn option_parsing_eq() {
+        // init
+        let mut result = HashMap::new();
+        let mut expected = HashMap::new();
+
+        // setup
+        let options = "key=value=3,key2,key3=value7=a=b=c".to_string();
+        expected.insert("key".to_string(), Some("value=3".to_string()));
+        expected.insert("key2".to_string(), None);
+        expected.insert("key3".to_string(), Some("value7=a=b=c".to_string()));
+
+        // execute
+        parse_options(options, |key, value| {
+            let _ = result.insert(key.to_string(), value.map(|v| v.to_string()));
+            Ok(())
+        })
+        .unwrap();
+
+        // verify
+        assert_eq!(expected, result)
+    }
 }
