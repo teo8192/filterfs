@@ -5,7 +5,7 @@ use fuser::INodeNo;
 #[derive(Clone)]
 pub struct INode {
     // id: INodeNo,
-    // parent: INodeNo,
+    parent: INodeNo,
     pub path: PathBuf,
 }
 
@@ -23,7 +23,7 @@ impl INodeManager {
         let inode = INode {
             // id: INodeNo(1),
             path: root.to_path_buf(),
-            // parent: INodeNo(1),
+            parent: INodeNo(1),
         };
 
         inodes.insert(INodeNo(1), inode);
@@ -47,19 +47,19 @@ impl INodeManager {
         }
 
         // need to get parent ino
-        /*let pino = match path.parent() {
+        let pino = match path.parent() {
             Some(p) => self.ino(p),
             None => {
                 return INodeNo(1); // has no parent, assume root
             }
-        };*/
+        };
 
         // need to allocate a new inode (and perhaps look for parent?)
         let nino = self.next_inode();
         let inode = INode {
             // id: nino,
             path: path.to_path_buf(),
-            // parent: pino,
+            parent: pino,
         };
 
         self.path_to_inode.insert(path.to_path_buf(), nino);
@@ -76,8 +76,7 @@ impl INodeManager {
         self.inodes.get(&ino).map(|v| v.path.clone())
     }
 
-    /*
-    fn parent(&self, ino: INodeNo) -> Option<INodeNo> {
+    pub fn parent(&self, ino: INodeNo) -> Option<INodeNo> {
         self.inodes.get(&ino).map(|v| v.parent)
-    }*/
+    }
 }

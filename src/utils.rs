@@ -1,8 +1,11 @@
 use std::fs;
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
+
+use log::trace;
 
 use fuser::{FileAttr, FileType, INodeNo};
 
@@ -25,12 +28,16 @@ fn filetype(metadata: &fs::Metadata) -> FileType {
     }
 }
 
-pub fn filetype_of_path(path: &PathBuf) -> Option<FileType> {
-    Some(filetype(&fs::metadata(path).ok()?))
+pub fn filetype_of_path(path: &PathBuf) -> io::Result<FileType> {
+    Ok(filetype(&fs::metadata(path)?))
 }
 
 fn permissions(perm: fs::Permissions) -> u16 {
-    (perm.mode() & 0o7777) as u16 // keep the lower 12 bits
+    let res = (perm.mode() & 0o7777) as u16; // keep the lower 12 bits
+
+    trace!("reading permissions, got: {:o}", res);
+
+    res
 }
 
 macro_rules! cutoff {

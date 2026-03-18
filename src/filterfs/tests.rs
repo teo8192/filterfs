@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::{fs, io};
@@ -71,6 +72,33 @@ impl FsTester {
         }
 
         Some(entries)
+    }
+
+    fn set_permissions(&self, path: &str, perm: fs::Permissions) {
+        let path = PathBuf::from(path);
+        fs::set_permissions(self.source.path().join(path), perm).unwrap();
+    }
+
+    fn check_permissions(&self, path: &str) {
+        let path = PathBuf::from(path);
+
+        let orig_file = self.source.path().join(&path);
+        let dest_file = self.mountpoint.path().join(&path);
+
+        let orig_metadata = fs::metadata(orig_file).unwrap();
+        let dest_metadata = fs::metadata(dest_file).unwrap();
+
+        assert_eq!(orig_metadata.size(), dest_metadata.size());
+        assert_eq!(orig_metadata.blocks(), dest_metadata.blocks());
+        assert_eq!(orig_metadata.mtime(), dest_metadata.mtime());
+        assert_eq!(orig_metadata.ctime(), dest_metadata.ctime());
+        assert_eq!(orig_metadata.file_type(), dest_metadata.file_type());
+        assert_eq!(orig_metadata.permissions(), dest_metadata.permissions());
+        assert_eq!(orig_metadata.nlink(), dest_metadata.nlink());
+        assert_eq!(orig_metadata.uid(), dest_metadata.uid());
+        assert_eq!(orig_metadata.gid(), dest_metadata.gid());
+        assert_eq!(orig_metadata.rdev(), dest_metadata.rdev());
+        assert_eq!(orig_metadata.blksize(), dest_metadata.blksize());
     }
 }
 
@@ -233,6 +261,49 @@ fn test_nopdf() {
 
     // asserts
     assert_eq!(expected, fst.read_dir("").unwrap());
+
+    handle.umount_and_join().unwrap();
+}
+
+#[test]
+fn test_emptydir() {
+    global_setup();
+
+    // setup
+    let mut fst = FsTester::new().unwrap();
+    let expected: HashSet<String> = HashSet::new();
+
+    fst.add_file("doc1.pdf", "");
+
+    fst.add_file("doc2.pdf", "");
+
+    fst.add_file("file.txt", "");
+
+    fst.add_file("whatever", "");
+
+    fst.add_dir("lol/wtf/is/this");
+    fst.add_dir("lol/wtf/thing/this");
+    fst.add_dir("lol/xd/thing/this");
+    fst.add_dir("lol/1/thing/this");
+
+    fst.add_dir("1");
+
+    // start filesystem
+    let fs = FilterFS::new(
+        fst.source(),
+        0,
+        vec![],
+        vec![PatternRule::new_exclude("*.pdf").unwrap()],
+        vec![],
+        vec![],
+    );
+    let options = test_options!();
+    let handle = fuser::spawn_mount2(fs, fst.mountpoint(), &options).unwrap();
+
+    // sleep for a bit to let the filesystem start up
+
+    // asserts
+    assert_eq!(expected, fst.read_dir("1").unwrap());
 
     handle.umount_and_join().unwrap();
 }
@@ -402,6 +473,46 @@ fn test_file_content_of_filtered_file() {
 
     // asserts
     assert!(fst.read_file("doc1.pdf").is_err());
+
+    handle.umount_and_join().unwrap();
+}
+
+#[test]
+fn same_permissions_simple() {
+    global_setup();
+
+    // setup
+    let mut fst = FsTester::new().unwrap();
+
+    fst.add_file("doc1.pdf", "what");
+    fst.add_file("doc2.pdf", "hello");
+    fst.add_file("file.txt", "shit content");
+    fst.add_file("whatever", "lol");
+
+    fst.add_dir("lol/wtf/is/this");
+    fst.add_dir("lol/wtf/thing/this");
+    fst.add_dir("lol/xd/thing/this");
+    fst.add_dir("lol/1/thing/this");
+
+    fst.add_dir("1");
+
+    // start filesystem
+    let fs = FilterFS::new(
+        fst.source(),
+        5,
+        vec![],
+        vec![PatternRule::new_exclude("*.pdf").unwrap()],
+        vec![],
+        vec![],
+    );
+    let options = test_options!();
+    let handle = fuser::spawn_mount2(fs, fst.mountpoint(), &options).unwrap();
+
+    // sleep for a bit to let the filesystem start up
+
+    // asserts
+    fst.check_permissions("file.txt");
+    fst.check_permissions("lol");
 
     handle.umount_and_join().unwrap();
 }

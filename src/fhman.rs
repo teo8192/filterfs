@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs;
+use std::{fs, io};
 
 use crate::id::IdManager;
 use crate::inoman::INode;
@@ -24,9 +24,9 @@ impl FhManager {
         }
     }
 
-    pub fn open(&mut self, inode: INode) -> Option<FhId> {
+    pub fn open(&mut self, inode: INode) -> io::Result<FhId> {
         let fhid = self.idman.get();
-        let fh = fs::File::open(&inode.path).ok()?;
+        let fh = fs::File::open(&inode.path)?;
         let handle = Handle {
             //inode,
             handle: fh,
@@ -34,7 +34,7 @@ impl FhManager {
 
         self.handle_to_inode.insert(fhid, handle);
 
-        Some(fhid)
+        Ok(fhid)
     }
 
     pub fn release(&mut self, id: FhId) {

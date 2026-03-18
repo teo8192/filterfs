@@ -6,13 +6,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use fuser::{
-    Errno, FileAttr, FileHandle, Filesystem, FopenFlags, Generation, INodeNo, LockOwner,
+    Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo, LockOwner,
     OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
     ReplyOpen, Request,
 };
 use log::{debug, trace};
 
-use crate::fhman::FhManager;
+use crate::fhman::{FhId, FhManager};
 use crate::inoman::INodeManager;
 use crate::pattern::PatternRule;
 use crate::utils;
@@ -127,131 +127,102 @@ impl FilterFS {
 
         self.dir_excl.iter().all(|rule| rule.include(dir))
     }
-}
 
-macro_rules! autorep {
-    ($val:expr, $rep:ident, $type:expr) => {
-        match $val {
-            Some(v) => v,
-            None => {
-                $rep.error($type);
-                return;
-            }
-        }
-    };
+    fn getattr(&self, ino: INodeNo, fh: Option<FhId>) -> Result<FileAttr, Errno> {
+        let metadata = if let Some(fh) = fh {
+            let fhman = self.fhman.lock().map_err(|_| Errno::EIO)?;
+            let handle = &fhman.handle(fh).ok_or(Errno::EIO)?.handle;
 
-    ($val:expr, $rep:ident) => {
-        match $val {
-            Some(v) => v,
-            None => {
-                $rep.error(Errno::EIO);
-                return;
-            }
-        }
-    };
-}
+            handle.metadata().map_err(|_| Errno::ENOENT)?
+        } else {
+            let inoman = self.inoman.lock().map_err(|_| Errno::EIO)?;
+            let path = inoman.path(ino).ok_or(Errno::EIO)?;
 
-impl Filesystem for FilterFS {
-    /// Get file attributes.
-    fn getattr(&self, _req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
-        debug!("Getting attributes for {}, fh: {:?}", ino, fh);
-        let inoman = autorep!(self.inoman.lock().ok(), reply, Errno::EIO);
-        let path = autorep!(inoman.path(ino), reply);
+            fs::metadata(&path)?
+        };
 
-        let metadata = autorep!(fs::metadata(&path).ok(), reply, Errno::ENOENT);
-
-        let attr: FileAttr = utils::convert_metadata(&metadata, ino);
-        reply.attr(&TTL, &attr);
+        Ok(utils::convert_metadata(&metadata, ino))
     }
 
-    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        debug!("lookup call on {:?} for parent {:?}", name, parent);
-
-        let mut inoman = autorep!(self.inoman.lock().ok(), reply);
-        let path = autorep!(inoman.path(parent), reply).join(name);
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr) -> Result<FileAttr, Errno> {
+        let mut inoman = self.inoman.lock().map_err(|_| Errno::EIO)?;
+        let path = inoman.path(parent).ok_or(Errno::ENOENT)?.join(name);
 
         if !self.include_file(&path) {
-            reply.error(Errno::ENOENT);
-            return;
+            return Err(Errno::ENOENT);
         }
 
         let ino = inoman.ino(&path);
-        let metadata = autorep!(fs::metadata(&path).ok(), reply, Errno::ENOENT);
-        reply.entry(
-            &TTL,
-            &utils::convert_metadata(&metadata, ino),
-            Generation(0),
-        );
+        let metadata = fs::metadata(&path)?;
+
+        Ok(utils::convert_metadata(&metadata, ino))
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags) -> Result<FileHandle, Errno> {
         if flags.acc_mode() != OpenAccMode::O_RDONLY {
-            reply.error(Errno::EROFS);
-            return;
+            return Err(Errno::EROFS);
         }
 
-        let inoman = autorep!(self.inoman.lock().ok(), reply);
-        let inode = autorep!(inoman.inode(ino), reply);
-        let mut fhman = autorep!(self.fhman.lock().ok(), reply);
-        let fh = autorep!(fhman.open(inode), reply);
+        let inoman = self.inoman.lock().map_err(|_| Errno::EIO)?;
+        let inode = inoman.inode(ino).ok_or(Errno::ENOENT)?;
+        let mut fhman = self.fhman.lock().map_err(|_| Errno::EIO)?;
 
-        reply.opened(FileHandle(fh), FopenFlags::empty());
-    }
-
-    fn release(
-        &self,
-        _req: &Request,
-        _ino: INodeNo,
-        fh: FileHandle,
-        _flags: OpenFlags,
-        _lock_owner: Option<LockOwner>,
-        _flush: bool,
-        reply: ReplyEmpty,
-    ) {
-        let mut fhman = autorep!(self.fhman.lock().ok(), reply);
-        fhman.release(fh.0);
-        reply.ok();
+        Ok(FileHandle(fhman.open(inode)?))
     }
 
     fn read(
         &self,
         _req: &Request,
-        _ino: INodeNo,
-        fh: FileHandle,
+        fh: FhId,
         offset: u64,
-        size: u32,
+        size: usize,
         _flags: OpenFlags,
-        _lock_owner: Option<LockOwner>,
-        reply: ReplyData,
-    ) {
-        let fhman = autorep!(self.fhman.lock().ok(), reply);
+    ) -> Result<Vec<u8>, Errno> {
+        let fhman = self.fhman.lock().map_err(|_| Errno::EIO)?;
+        let handle = fhman.handle(fh).ok_or(Errno::EBADF)?;
+        let mut buf = vec![0u8; size];
+        let count = handle.handle.read_at(&mut buf, offset)?;
 
-        let handle = autorep!(fhman.handle(fh.0), reply, Errno::EBADF);
-        let mut buf = vec![0u8; size as usize];
-        let count = autorep!(handle.handle.read_at(&mut buf, offset).ok(), reply);
+        buf.truncate(count);
 
-        reply.data(&buf[..count]);
+        Ok(buf)
     }
 
     fn readdir(
         &self,
         _req: &Request,
         ino: INodeNo,
-        fh: FileHandle,
+        _fh: FhId,
         offset: u64,
-        mut reply: ReplyDirectory,
-    ) {
-        debug!("Entering readdir, fh: {:?}, offset: {}", fh, offset);
-        let mut inoman = autorep!(self.inoman.lock().ok(), reply);
-        let path = autorep!(inoman.path(ino), reply);
+        reply: &mut ReplyDirectory,
+    ) -> Result<(), Errno> {
+        let mut inoman = self.inoman.lock().map_err(|_| Errno::EIO)?;
+        let path = inoman.path(ino).ok_or(Errno::ENOENT)?;
 
-        // check if directory
+        // check if dir
         if !path.is_dir() {
-            reply.error(Errno::ENOTDIR);
-            return;
+            return Err(Errno::ENOTDIR);
         }
 
-        for (i, entry_result) in autorep!(fs::read_dir(&path).ok(), reply)
+        let mut num_added = 0;
+
+        if offset == 0 {
+            // increment before, offset in reply is offset to next entry
+            num_added += 1;
+            if reply.add(ino, num_added, FileType::Directory, ".") {
+                return Ok(());
+            }
+        }
+
+        if offset <= 1 {
+            num_added += 1;
+            let parent = inoman.parent(ino).ok_or(Errno::ENOENT)?;
+            if reply.add(parent, num_added, FileType::Directory, "..") {
+                return Ok(());
+            }
+        }
+
+        for (i, entry_result) in fs::read_dir(&path)?
             .filter(|entry_result| {
                 if let Ok(entry) = entry_result {
                     let path = entry.path();
@@ -268,20 +239,106 @@ impl Filesystem for FilterFS {
             .skip(offset as usize)
             .enumerate()
         {
-            let entry = autorep!(entry_result.ok(), reply);
+            let entry = entry_result?;
             let path = entry.path();
             let ino = inoman.ino(&path);
-            let kind = autorep!(utils::filetype_of_path(&path), reply);
-            let name = autorep!(path.file_name(), reply);
-            let name = autorep!(name.to_str(), reply);
+            let kind = utils::filetype_of_path(&path)?;
+            let name = path.file_name().ok_or(Errno::EIO)?;
+            let name = name.to_str().ok_or(Errno::EIO)?;
 
             // return offset of next entry
-            if reply.add(ino, i as u64 + offset + 1, kind, name) {
+            if reply.add(ino, i as u64 + offset + 1 + num_added, kind, name) {
                 // buffer full
-                return;
+                return Ok(());
             }
         }
 
-        reply.ok()
+        Ok(())
+    }
+}
+
+impl Filesystem for FilterFS {
+    /// Get file attributes.
+    fn getattr(&self, _req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
+        debug!("Getting attributes for {}, fh: {:?}", ino, fh);
+        match self.getattr(ino, fh.map(|fh| fh.0)) {
+            Ok(attr) => reply.attr(&TTL, &attr),
+            Err(err) => reply.error(err),
+        };
+    }
+
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        debug!("lookup call on {:?} for parent {:?}", name, parent);
+
+        match self.lookup(_req, parent, name) {
+            Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
+            Err(err) => reply.error(err),
+        }
+    }
+
+    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        debug!("open call on {:?}", ino);
+
+        match self.open(_req, ino, flags) {
+            Ok(fh) => reply.opened(fh, FopenFlags::empty()),
+            Err(err) => reply.error(err),
+        }
+    }
+
+    fn release(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        debug!("release call on {:?}", fh);
+
+        match self.fhman.lock() {
+            Ok(mut fhman) => {
+                fhman.release(fh.0);
+                reply.ok();
+            }
+            Err(_) => {
+                reply.error(Errno::EIO);
+            }
+        }
+    }
+
+    fn read(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        size: u32,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
+        reply: ReplyData,
+    ) {
+        match self.read(_req, fh.0, offset, size as usize, _flags) {
+            Ok(buf) => reply.data(&buf),
+            Err(err) => reply.error(err),
+        }
+    }
+
+    fn readdir(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        mut reply: ReplyDirectory,
+    ) {
+        debug!("Entering readdir, fh: {:?}, offset: {}", fh, offset);
+        match self.readdir(_req, ino, fh.0, offset, &mut reply) {
+            Ok(()) => {
+                reply.ok();
+            }
+            Err(err) => reply.error(err),
+        }
     }
 }
