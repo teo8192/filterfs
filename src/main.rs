@@ -8,7 +8,9 @@ use log::debug;
 use filterfs::filterfs::FilterFS;
 use filterfs::pattern::PatternRule;
 
-/// FilterFS
+/// # FilterFS
+///
+/// A FUSE file system to mirror another directory, but filter what is shown.
 #[derive(Parser)]
 struct Args {
     /// Underlying source directory
@@ -60,12 +62,14 @@ where
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    match unsafe { nix::unistd::fork().unwrap() } {
-        nix::unistd::ForkResult::Parent { .. } => return Ok(()),
-        nix::unistd::ForkResult::Child => {}
-    }
-
     let args = Args::parse();
+
+    if !args.foreground {
+        match unsafe { nix::unistd::fork().unwrap() } {
+            nix::unistd::ForkResult::Parent { .. } => return Ok(()),
+            nix::unistd::ForkResult::Child => {}
+        }
+    }
 
     let mut file_incl = Vec::new();
     let mut file_excl = Vec::new();
