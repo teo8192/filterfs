@@ -69,7 +69,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             let value = value.ok_or_else(|| format!("{} needs a value!", key));
             let glob_fail = {
                 let v2 = value.clone();
-                |e| format!("unable to parse glob: '{}': {}", v2.unwrap(), e)
+                |e| {
+                    format!(
+                        "unable to parse glob for '{}': '{}': {}",
+                        key,
+                        v2.unwrap(),
+                        e
+                    )
+                }
             };
             match key {
                 "incl" => {
