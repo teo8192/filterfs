@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use clap::Parser;
 use filterfs::filter::Filter;
 use fuser::{Config, MountOption};
-use log::debug;
 
 use filterfs::filterfs::FilterFS;
 use filterfs::pattern::PatternRule;
@@ -48,20 +47,6 @@ struct Args {
     options: Option<String>,
 }
 
-fn parse_options<F>(options: String, mut callback: F) -> Result<(), String>
-where
-    F: FnMut(&str, Option<&str>) -> Result<(), String>,
-{
-    for option in options.split(',') {
-        let mut option = option.splitn(2, '=');
-        if let Some(opt) = option.next() && !opt.is_empty() {
-            callback(opt, option.next())?;
-        }
-    }
-
-    Ok(())
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
@@ -80,35 +65,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
     if let Some(options) = args.options {
-        parse_options(options, |key, value| {
-            let value = || value.ok_or_else(|| format!("{} needs a value!", key));
-            let glob_fail = |e| format!("unable to parse glob: '{}': {}", value().unwrap(), e);
+        filterfs::args::parse_options(options, |key, value| {
+            let value = value.ok_or_else(|| format!("{} needs a value!", key));
+            let glob_fail = {
+                let v2 = value.clone();
+                |e| format!("unable to parse glob: '{}': {}", v2.unwrap(), e)
+            };
             match key {
                 "incl" => {
-                    let value = value()?;
-                    file_rules.push(PatternRule::new_include(value).map_err(glob_fail)?);
-                    debug!("adding file include: '{}'", value);
+                    file_rules.push(PatternRule::new_include(value?).map_err(glob_fail)?);
                 }
                 "excl" => {
-                    let value = value()?;
-                    file_rules.push(PatternRule::new_exclude(value).map_err(glob_fail)?);
-                    debug!("adding file exclude: '{}'", value);
+                    file_rules.push(PatternRule::new_exclude(value?).map_err(glob_fail)?);
                 }
                 "dincl" => {
-                    let value = value()?;
-                    dir_rules.push(PatternRule::new_include(value).map_err(glob_fail)?);
-                    debug!("adding dir include: '{}'", value);
+                    dir_rules.push(PatternRule::new_include(value?).map_err(glob_fail)?);
                 }
                 "dexcl" => {
-                    let value = value()?;
-                    dir_rules.push(PatternRule::new_exclude(value).map_err(glob_fail)?);
-                    debug!("adding dir exclude: '{}'", value);
+                    dir_rules.push(PatternRule::new_exclude(value?).map_err(glob_fail)?);
                 }
                 "prune" => {
-                    let value = value()?;
                     prune_depth = value
+                        .clone()?
                         .parse()
-                        .map_err(|e| format!("unable to num: '{}': {}", value, e))?;
+                        .map_err(|e| format!("unable to num: '{}': {}", value.unwrap(), e))?;
                 }
                 "allow_other" => {
                     allow_other = true;
@@ -124,12 +104,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         })?;
     }
 
-    let filter = Filter::new(&file_rules, &dir_rules);
-
     let filesys = FilterFS::new(
         &args.source,
         prune_depth,
-        filter,
+        Filter::new(&file_rules, &dir_rules),
     );
     let mut options = Config::default();
     options.mount_options = vec![
@@ -143,101 +121,4 @@ fn main() -> Result<(), Box<dyn Error>> {
     fuser::mount2(filesys, args.mountpoint, &options)?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use crate::parse_options;
-
-    #[test]
-    fn option_parsing() {
-        // init
-        let mut result = HashMap::new();
-        let mut expected = HashMap::new();
-
-        // setup
-        let options = "key=value".to_string();
-        expected.insert("key".to_string(), Some("value".to_string()));
-
-        // execute
-        parse_options(options, |key, value| {
-            let _ = result.insert(key.to_string(), value.map(|v| v.to_string()));
-            Ok(())
-        })
-        .unwrap();
-
-        // verify
-        assert_eq!(expected, result)
-    }
-
-    #[test]
-    fn option_parsing_multiple() {
-        // init
-        let mut result = HashMap::new();
-        let mut expected = HashMap::new();
-
-        // setup
-        let options = "key=value,key2,key3=value7".to_string();
-        expected.insert("key".to_string(), Some("value".to_string()));
-        expected.insert("key2".to_string(), None);
-        expected.insert("key3".to_string(), Some("value7".to_string()));
-
-        // execute
-        parse_options(options, |key, value| {
-            let _ = result.insert(key.to_string(), value.map(|v| v.to_string()));
-            Ok(())
-        })
-        .unwrap();
-
-        // verify
-        assert_eq!(expected, result)
-    }
-
-    #[test]
-    fn option_parsing_handle_empty() {
-        // init
-        let mut result = HashMap::new();
-        let mut expected = HashMap::new();
-
-        // setup
-        let options = "key=value,,,key2,,key3=value7".to_string();
-        expected.insert("key".to_string(), Some("value".to_string()));
-        expected.insert("key2".to_string(), None);
-        expected.insert("key3".to_string(), Some("value7".to_string()));
-
-        // execute
-        parse_options(options, |key, value| {
-            let _ = result.insert(key.to_string(), value.map(|v| v.to_string()));
-            Ok(())
-        })
-        .unwrap();
-
-        // verify
-        assert_eq!(expected, result)
-    }
-
-    #[test]
-    fn option_parsing_eq() {
-        // init
-        let mut result = HashMap::new();
-        let mut expected = HashMap::new();
-
-        // setup
-        let options = "key=value=3,key2,key3=value7=a=b=c".to_string();
-        expected.insert("key".to_string(), Some("value=3".to_string()));
-        expected.insert("key2".to_string(), None);
-        expected.insert("key3".to_string(), Some("value7=a=b=c".to_string()));
-
-        // execute
-        parse_options(options, |key, value| {
-            let _ = result.insert(key.to_string(), value.map(|v| v.to_string()));
-            Ok(())
-        })
-        .unwrap();
-
-        // verify
-        assert_eq!(expected, result)
-    }
 }
