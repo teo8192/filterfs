@@ -8,6 +8,7 @@ use fuser::{Config, MountOption};
 use log::Level;
 use tempfile::{tempdir, TempDir};
 
+use crate::filter::Filter;
 use crate::pattern::PatternRule;
 
 use super::FilterFS;
@@ -119,7 +120,7 @@ fn test_empty() {
     let expected: HashSet<String> = HashSet::new();
 
     // start filesystem
-    let fs = FilterFS::new(fst.source(), 0, vec![], vec![], vec![], vec![]);
+    let fs = FilterFS::new(fst.source(), 0, Filter::empty());
     let options = test_options!();
     let handle = fuser::spawn_mount2(fs, fst.mountpoint(), &options).unwrap();
 
@@ -159,7 +160,7 @@ fn test_transparent() {
     expected.insert("1".to_string());
 
     // start filesystem
-    let fs = FilterFS::new(fst.source(), 0, vec![], vec![], vec![], vec![]);
+    let fs = FilterFS::new(fst.source(), 0, Filter::empty());
     let options = test_options!();
     let handle = fuser::spawn_mount2(fs, fst.mountpoint(), &options).unwrap();
 
@@ -199,14 +200,8 @@ fn test_onlypdf() {
     expected.insert("1".to_string());
 
     // start filesystem
-    let fs = FilterFS::new(
-        fst.source(),
-        0,
-        vec![PatternRule::new_include("*.pdf").unwrap()],
-        vec![],
-        vec![],
-        vec![],
-    );
+    let filter = Filter::new(&[PatternRule::new_include("*.pdf").unwrap()], &[]);
+    let fs = FilterFS::new(fst.source(), 0, filter);
     let options = test_options!();
     let handle = fuser::spawn_mount2(fs, fst.mountpoint(), &options).unwrap();
 
@@ -246,14 +241,8 @@ fn test_nopdf() {
     expected.insert("1".to_string());
 
     // start filesystem
-    let fs = FilterFS::new(
-        fst.source(),
-        0,
-        vec![],
-        vec![PatternRule::new_exclude("*.pdf").unwrap()],
-        vec![],
-        vec![],
-    );
+    let filter = Filter::new(&[PatternRule::new_exclude("*.pdf").unwrap()], &[]);
+    let fs = FilterFS::new(fst.source(), 0, filter);
     let options = test_options!();
     let handle = fuser::spawn_mount2(fs, fst.mountpoint(), &options).unwrap();
 
@@ -289,14 +278,8 @@ fn test_emptydir() {
     fst.add_dir("1");
 
     // start filesystem
-    let fs = FilterFS::new(
-        fst.source(),
-        0,
-        vec![],
-        vec![PatternRule::new_exclude("*.pdf").unwrap()],
-        vec![],
-        vec![],
-    );
+    let filter = Filter::new(&[PatternRule::new_exclude("*.pdf").unwrap()], &[]);
+    let fs = FilterFS::new(fst.source(), 0, filter);
     let options = test_options!();
     let handle = fuser::spawn_mount2(fs, fst.mountpoint(), &options).unwrap();
 
@@ -335,14 +318,8 @@ fn test_low_prune() {
     fst.add_dir("1");
 
     // start filesystem
-    let fs = FilterFS::new(
-        fst.source(),
-        1,
-        vec![],
-        vec![PatternRule::new_exclude("*.pdf").unwrap()],
-        vec![],
-        vec![],
-    );
+    let filter = Filter::new(&[PatternRule::new_exclude("*.pdf").unwrap()], &[]);
+    let fs = FilterFS::new(fst.source(), 1, filter);
     let options = test_options!();
     let handle = fuser::spawn_mount2(fs, fst.mountpoint(), &options).unwrap();
 
@@ -380,14 +357,8 @@ fn test_high_prune() {
     fst.add_dir("1");
 
     // start filesystem
-    let fs = FilterFS::new(
-        fst.source(),
-        5,
-        vec![],
-        vec![PatternRule::new_exclude("*.pdf").unwrap()],
-        vec![],
-        vec![],
-    );
+    let filter = Filter::new(&[PatternRule::new_exclude("*.pdf").unwrap()], &[]);
+    let fs = FilterFS::new(fst.source(), 5, filter);
     let options = test_options!();
     let handle = fuser::spawn_mount2(fs, fst.mountpoint(), &options).unwrap();
 
@@ -419,14 +390,8 @@ fn test_file_content_of_acceptable_file() {
     fst.add_dir("1");
 
     // start filesystem
-    let fs = FilterFS::new(
-        fst.source(),
-        5,
-        vec![],
-        vec![PatternRule::new_exclude("*.pdf").unwrap()],
-        vec![],
-        vec![],
-    );
+    let filter = Filter::new(&[PatternRule::new_exclude("*.pdf").unwrap()], &[]);
+    let fs = FilterFS::new(fst.source(), 5, filter);
     let options = test_options!();
     let handle = fuser::spawn_mount2(fs, fst.mountpoint(), &options).unwrap();
 
@@ -458,14 +423,8 @@ fn test_file_content_of_filtered_file() {
     fst.add_dir("1");
 
     // start filesystem
-    let fs = FilterFS::new(
-        fst.source(),
-        5,
-        vec![],
-        vec![PatternRule::new_exclude("*.pdf").unwrap()],
-        vec![],
-        vec![],
-    );
+    let filter = Filter::new(&[PatternRule::new_exclude("*.pdf").unwrap()], &[]);
+    let fs = FilterFS::new(fst.source(), 5, filter);
     let options = test_options!();
     let handle = fuser::spawn_mount2(fs, fst.mountpoint(), &options).unwrap();
 
@@ -497,14 +456,8 @@ fn same_permissions_simple() {
     fst.add_dir("1");
 
     // start filesystem
-    let fs = FilterFS::new(
-        fst.source(),
-        5,
-        vec![],
-        vec![PatternRule::new_exclude("*.pdf").unwrap()],
-        vec![],
-        vec![],
-    );
+    let filter = Filter::new(&[PatternRule::new_exclude("*.pdf").unwrap()], &[]);
+    let fs = FilterFS::new(fst.source(), 5, filter);
     let options = test_options!();
     let handle = fuser::spawn_mount2(fs, fst.mountpoint(), &options).unwrap();
 

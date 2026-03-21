@@ -13,8 +13,8 @@ use fuser::{
 use log::{debug, trace};
 
 use crate::fhman::{FhId, FhManager};
+use crate::filter::Filter;
 use crate::inoman::INodeManager;
-use crate::pattern::PatternRule;
 use crate::utils;
 
 #[cfg(test)]
@@ -24,31 +24,18 @@ const TTL: Duration = Duration::from_secs(1);
 
 pub struct FilterFS {
     // root: PathBuf,
-    dir_incl: Vec<PatternRule>,
-    dir_excl: Vec<PatternRule>,
-    file_incl: Vec<PatternRule>,
-    file_excl: Vec<PatternRule>,
+    filter: Filter,
     prune_depth: usize,
     inoman: Mutex<INodeManager>,
     fhman: Mutex<FhManager>,
 }
 
 impl FilterFS {
-    pub fn new(
-        root: &Path,
-        prune_depth: usize,
-        file_incl: Vec<PatternRule>,
-        file_excl: Vec<PatternRule>,
-        dir_incl: Vec<PatternRule>,
-        dir_excl: Vec<PatternRule>,
-    ) -> Self {
+    pub fn new(root: &Path, prune_depth: usize, filter: Filter) -> Self {
         let inoman = INodeManager::new(root);
         Self {
             // root,
-            dir_incl,
-            dir_excl,
-            file_incl,
-            file_excl,
+            filter,
             prune_depth,
             inoman: Mutex::new(inoman),
             fhman: Mutex::new(FhManager::new()),
@@ -80,9 +67,9 @@ impl FilterFS {
                 let path = entry.path();
 
                 if path.is_dir() {
-                    self.include_dir(&path) && !self.is_empty_dir(&path, depth - 1)
+                    self.filter.include_dir(&path) && !self.is_empty_dir(&path, depth - 1)
                 } else {
-                    self.include_file(&path)
+                    self.filter.include_file(&path)
                 }
             })
             .is_none();
@@ -92,40 +79,6 @@ impl FilterFS {
             trace!("{:?} is not empty!", dir);
         }
         result
-    }
-
-    fn include_file(&self, file: &Path) -> bool {
-        let mut include = self.file_incl.is_empty();
-        for rule in &self.file_incl {
-            if rule.include(file) {
-                trace!("Include rule: {:?} matches {:?}!", rule, file);
-                include = true;
-                break;
-            }
-        }
-
-        if !include {
-            return false;
-        }
-
-        self.file_excl.iter().all(|rule| rule.include(file))
-    }
-
-    fn include_dir(&self, dir: &Path) -> bool {
-        let mut include = self.dir_incl.is_empty();
-        for rule in &self.dir_incl {
-            if rule.include(dir) {
-                trace!("Include rule: {:?} matches {:?}!", rule, dir);
-                include = true;
-                break;
-            }
-        }
-
-        if !include {
-            return false;
-        }
-
-        self.dir_excl.iter().all(|rule| rule.include(dir))
     }
 
     fn getattr(&self, ino: INodeNo, fh: Option<FhId>) -> Result<FileAttr, Errno> {
@@ -148,8 +101,8 @@ impl FilterFS {
         let mut inoman = self.inoman.lock().map_err(|_| Errno::EIO)?;
         let path = inoman.path(parent).ok_or(Errno::ENOENT)?.join(name);
 
-        let dir_fail = path.is_dir() && !self.include_dir(&path);
-        let file_fail = !path.is_dir() && !self.include_file(&path);
+        let dir_fail = path.is_dir() && !self.filter.include_dir(&path);
+        let file_fail = !path.is_dir() && !self.filter.include_file(&path);
 
         if dir_fail || file_fail {
             return Err(Errno::ENOENT);
@@ -230,10 +183,10 @@ impl FilterFS {
                 if let Ok(entry) = entry_result {
                     let path = entry.path();
                     if path.is_dir() {
-                        self.include_dir(&path)
+                        self.filter.include_dir(&path)
                             && !self.is_empty_dir(&path, self.prune_depth as isize)
                     } else {
-                        self.include_file(&path)
+                        self.filter.include_file(&path)
                     }
                 } else {
                     true

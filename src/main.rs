@@ -2,6 +2,7 @@ use std::error::Error;
 use std::path::PathBuf;
 
 use clap::Parser;
+use filterfs::filter::Filter;
 use fuser::{Config, MountOption};
 use log::debug;
 
@@ -71,10 +72,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let mut file_incl = Vec::new();
-    let mut file_excl = Vec::new();
-    let mut dir_incl = Vec::new();
-    let mut dir_excl = Vec::new();
+    let mut file_rules = Vec::new();
+    let mut dir_rules = Vec::new();
+
     let mut allow_other = false;
     let mut prune_depth = 0;
     env_logger::init();
@@ -86,22 +86,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             match key {
                 "incl" => {
                     let value = value()?;
-                    file_incl.push(PatternRule::new_include(value).map_err(glob_fail)?);
+                    file_rules.push(PatternRule::new_include(value).map_err(glob_fail)?);
                     debug!("adding file include: '{}'", value);
                 }
                 "excl" => {
                     let value = value()?;
-                    file_excl.push(PatternRule::new_exclude(value).map_err(glob_fail)?);
+                    file_rules.push(PatternRule::new_exclude(value).map_err(glob_fail)?);
                     debug!("adding file exclude: '{}'", value);
                 }
                 "dincl" => {
                     let value = value()?;
-                    dir_incl.push(PatternRule::new_include(value).map_err(glob_fail)?);
+                    dir_rules.push(PatternRule::new_include(value).map_err(glob_fail)?);
                     debug!("adding dir include: '{}'", value);
                 }
                 "dexcl" => {
                     let value = value()?;
-                    dir_excl.push(PatternRule::new_exclude(value).map_err(glob_fail)?);
+                    dir_rules.push(PatternRule::new_exclude(value).map_err(glob_fail)?);
                     debug!("adding dir exclude: '{}'", value);
                 }
                 "prune" => {
@@ -124,13 +124,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         })?;
     }
 
+    let filter = Filter::new(&file_rules, &dir_rules);
+
     let filesys = FilterFS::new(
         &args.source,
         prune_depth,
-        file_incl,
-        file_excl,
-        dir_incl,
-        dir_excl,
+        filter,
     );
     let mut options = Config::default();
     options.mount_options = vec![

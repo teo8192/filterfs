@@ -1,6 +1,8 @@
-pub mod id;
+pub(crate) mod id;
+pub(crate) mod inoman;
+pub(crate) mod fhman;
+pub(crate) mod utils;
+
 pub mod pattern;
-pub mod inoman;
-pub mod fhman;
-pub mod utils;
 pub mod filterfs;
+pub mod filter;
