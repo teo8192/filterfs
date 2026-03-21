@@ -7,6 +7,7 @@ use fuser::{Config, MountOption};
 
 use filterfs::filterfs::FilterFS;
 use filterfs::pattern::PatternRule;
+use nix::unistd::{ForkResult, fork};
 
 /// # FilterFS
 ///
@@ -50,11 +51,10 @@ struct Args {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
-    if !args.foreground {
-        match unsafe { nix::unistd::fork().unwrap() } {
-            nix::unistd::ForkResult::Parent { .. } => return Ok(()),
-            nix::unistd::ForkResult::Child => {}
-        }
+    if !args.foreground
+        && let ForkResult::Parent { .. } = unsafe { fork().unwrap() }
+    {
+        return Ok(());
     }
 
     let mut file_rules = Vec::new();

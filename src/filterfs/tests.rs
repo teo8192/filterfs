@@ -6,7 +6,7 @@ use std::{fs, io};
 
 use fuser::{Config, MountOption};
 use log::Level;
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 
 use crate::filter::Filter;
 use crate::pattern::PatternRule;

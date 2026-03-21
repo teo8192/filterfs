@@ -1,5 +1,5 @@
-use std::path::Path;
 use glob::{Pattern, PatternError};
+use std::path::Path;
 
 #[derive(Debug)]
 pub enum PatternRule {
@@ -51,4 +51,3 @@ impl PatternRule {
         try_match(self, file).unwrap_or(false)
     }
 }
-

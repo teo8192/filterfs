@@ -6,9 +6,14 @@ where
 {
     for option in options.split(',') {
         let mut option = option.splitn(2, '=');
-        if let Some(opt) = option.next() && !opt.is_empty() {
+        if let Some(opt) = option.next()
+            && !opt.is_empty()
+        {
             let value = option.next();
-            trace!("Running callback on option '{}' with value: {:?}", opt, value);
+            trace!(
+                "Running callback on option '{}' with value: {:?}",
+                opt, value
+            );
             callback(opt, value)?;
         }
     }
